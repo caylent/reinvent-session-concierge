@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from fastapi import FastAPI
@@ -6,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware  # Import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
-from retriever import question_stream
+from retriever import question_stream, DateTimeEncoder
 
 log_level = logging.getLevelName(os.getenv("LOG_LEVEL", "DEBUG").upper())
 logger = logging.getLogger("question-service")
@@ -36,10 +37,13 @@ app.add_middleware(
 
 @app.post("/question")
 async def process_question(request: QuestionRequest):
-    return StreamingResponse(
-        question_stream(request.prompt, retry_on_exception=True),
-        media_type="text/event-stream",
-    )
+    async def json_stream():
+        for chunk in question_stream(
+            request.prompt, retry_on_exception=True, retry_on_no_results=True
+        ):
+            yield json.dumps(chunk, cls=DateTimeEncoder)
+
+    return StreamingResponse(json_stream(), media_type="application/json")
 
 
 if __name__ == "__main__":
