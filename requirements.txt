@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+boto3
+pydantic
+psycopg2
+pgvector
+SQLAlchemy
