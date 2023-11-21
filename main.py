@@ -41,9 +41,9 @@ async def process_question(request: QuestionRequest):
         for chunk in question_stream(
             request.prompt, retry_on_exception=True, retry_on_no_results=True
         ):
-            yield json.dumps(chunk, cls=DateTimeEncoder)
+            yield json.dumps(chunk, cls=DateTimeEncoder) + "\n"
 
-    return StreamingResponse(json_stream(), media_type="application/json")
+    return StreamingResponse(json_stream(), media_type="application/x-ndjson")
 
 
 if __name__ == "__main__":
