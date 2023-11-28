@@ -9,6 +9,7 @@ import time
 import boto3
 import botocore
 from botocore.config import Config
+from boto3.dynamodb.conditions import Key
 from sqlalchemy import create_engine, text
 
 retry_config = Config(
@@ -17,6 +18,13 @@ retry_config = Config(
 
 DB_CONNECTION_STRING = os.getenv("DB_CONNECTION_STRING")
 logger = logging.getLogger("question-service")
+
+ddb_r = boto3.resource("dynamodb")
+bedrock_r = boto3.client("bedrock-runtime", config=retry_config)
+prompt_table = ddb_r.Table("session-concierge")
+comprehend = boto3.client("comprehend")
+
+engine = create_engine(DB_CONNECTION_STRING)
 
 
 class DateTimeEncoder(json.JSONEncoder):
@@ -44,23 +52,14 @@ def cache_with_timeout(timeout_sec):
 
 
 @cache_with_timeout(300)
-def fetch_value(prompt_table, pk, sk):
-    return prompt_table.get_item(Key={"PK": pk, "SK": sk})["Item"]["prompt"]
-
-
-ddb_r = boto3.resource("dynamodb")
-bedrock_r = boto3.client("bedrock-runtime", config=retry_config)
-prompt_table = ddb_r.Table("session-concierge")
-comprehend = boto3.client("comprehend")
-
-engine = create_engine(DB_CONNECTION_STRING)
-
-TABLE_SCHEMA = fetch_value(prompt_table, "PROMPT#TABLE_SCHEMA", "PROMPT")
-SQL_QUERY_GEN_PROMPT = fetch_value(prompt_table, "PROMPT#SQL_QUERY_GEN", "PROMPT")
-RESULT_GEN_PROMPT = fetch_value(prompt_table, "PROMPT#RESULT_GEN", "PROMPT")
-CORRECT_SQL_QUERY_PROMPT = fetch_value(
-    prompt_table, "PROMPT#CORRECT_SQL_QUERY", "PROMPT"
-)
+def fetch_latest_prompt(prompt_table, pk, sk_prefix="PROMPT"):
+    response = prompt_table.query(
+        KeyConditionExpression=Key("PK").eq(pk) & Key("SK").begins_with(sk_prefix),
+        ScanIndexForward=False,
+        Limit=1,
+    )
+    items = response.get("Items", [])
+    return items[0]["prompt"]
 
 
 def get_vector_for_query(text_for_vectorization):
@@ -81,8 +80,15 @@ def generate_query(query_str):
                     "temperature": 0.1,
                     "top_p": 1.0,
                     "max_tokens_to_sample": 1024 * 10,
-                    "prompt": SQL_QUERY_GEN_PROMPT.format(
-                        query_str=query_str, schema=TABLE_SCHEMA
+                    "prompt": fetch_latest_prompt(
+                        prompt_table,
+                        "PROMPT#SQL_QUERY_GEN",
+                    ).format(
+                        query_str=query_str,
+                        schema=fetch_latest_prompt(
+                            prompt_table,
+                            "PROMPT#TABLE_SCHEMA",
+                        ),
                     ),
                 }
             ),
@@ -105,36 +111,22 @@ def correct_sql_query(original_question, query, error):
                     "temperature": 0.9,
                     "top_p": 1.0,
                     "max_tokens_to_sample": 1024 * 10,
-                    "prompt": CORRECT_SQL_QUERY_PROMPT.format(
+                    "prompt": fetch_latest_prompt(
+                        prompt_table,
+                        "PROMPT#CORRECT_SQL_QUERY",
+                    ).format(
                         original_question=original_question,
                         original_query=query,
                         error=error,
-                        schema=TABLE_SCHEMA,
+                        schema=fetch_latest_prompt(
+                            prompt_table, "PROMPT#TABLE_SCHEMA", "PROMPT"
+                        ),
                     ),
                 }
             ),
         )["body"].read()
     )["completion"].strip()
     return re.search(r"<NEW_QUERY>\s*(.*?)\s*</NEW_QUERY>", resp, re.DOTALL).group(1)
-
-
-def generate_response(original_question, results):
-    return json.loads(
-        bedrock_r.invoke_model(
-            modelId="anthropic.claude-v2",
-            body=json.dumps(
-                {
-                    "temperature": 0.9,
-                    "top_p": 1.0,
-                    "max_tokens_to_sample": 1024 * 10,
-                    "prompt": RESULT_GEN_PROMPT.format(
-                        original_question=original_question, results=results
-                    ),
-                },
-                cls=DateTimeEncoder,
-            ),
-        )["body"].read()
-    )["completion"].strip()
 
 
 def generate_response_stream(original_question, results):
@@ -145,9 +137,9 @@ def generate_response_stream(original_question, results):
                 "temperature": 0.9,
                 "top_p": 1.0,
                 "max_tokens_to_sample": 1024 * 10,
-                "prompt": RESULT_GEN_PROMPT.format(
-                    original_question=original_question, results=results
-                ),
+                "prompt": fetch_latest_prompt(
+                    prompt_table, "PROMPT#RESULT_GEN", "PROMPT"
+                ).format(original_question=original_question, results=results),
             }
         ),
     ).get("body")
@@ -164,7 +156,7 @@ def question_stream(
         )["Classes"]
         for cls in prompt_classes:
             if cls["Name"] == "UNDESIRED_PROMPT":
-                if cls["Score"] >= 0.8:
+                if cls["Score"] >= 0.9:
                     yield {
                         "status": "error",
                         "output": "Amazon Comprehend determined this was an unsafe prompt. Please try again.",
