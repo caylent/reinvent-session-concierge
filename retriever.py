@@ -74,7 +74,7 @@ def get_vector_for_query(text_for_vectorization):
 def generate_query(query_str):
     query = json.loads(
         bedrock_r.invoke_model(
-            modelId="anthropic.claude-v2",
+            modelId="anthropic.claude-v2:1",
             body=json.dumps(
                 {
                     "temperature": 0.1,
@@ -105,7 +105,7 @@ def generate_query(query_str):
 def correct_sql_query(original_question, query, error):
     resp = json.loads(
         bedrock_r.invoke_model(
-            modelId="anthropic.claude-v2",
+            modelId="anthropic.claude-v2:1",
             body=json.dumps(
                 {
                     "temperature": 0.9,
@@ -131,7 +131,7 @@ def correct_sql_query(original_question, query, error):
 
 def generate_response_stream(original_question, results):
     return bedrock_r.invoke_model_with_response_stream(
-        modelId="anthropic.claude-v2",
+        modelId="anthropic.claude-v2:1",
         body=json.dumps(
             {
                 "temperature": 0.9,
